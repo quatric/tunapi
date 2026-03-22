@@ -27,8 +27,10 @@ logger = get_logger(__name__)
 _RAWQ_CONTEXT_RE = re.compile(r"<relevant_code>.*?</relevant_code>\s*---\s*", re.DOTALL)
 # 크로스 세션 요약 블록을 히스토리에서 제거하는 패턴
 _SIBLING_CONTEXT_RE = re.compile(r"<sibling_sessions>.*?</sibling_sessions>\s*---\s*", re.DOTALL)
-from .context_store import ConversationContextStore
+
 from .commands import dispatch_command
+from .context_store import ConversationContextStore
+
 
 class TunadishBackend:
     id = "tunadish"
@@ -169,13 +171,26 @@ class TunadishBackend:
                             data = json.loads(message)
                             method = data.get("method")
                             params = data.get("params", {})
+                            rpc_id = data.get("id")
+
+                            # JSON-RPC 2.0: rpc_id가 있고 fire-and-forget이 아닌 메서드는
+                            # 다음 _send_notification 호출을 표준 response로 자동 변환
+                            if rpc_id is not None and method not in ("ping", "chat.send", "run.cancel"):
+                                transport.set_rpc_id(rpc_id)
 
                             if method == "ping":
-                                await websocket.send(json.dumps({"method": "pong"}))
+                                if rpc_id is not None:
+                                    await transport._send_response(rpc_id, {"pong": True})
+                                else:
+                                    await websocket.send(json.dumps({"method": "pong"}))
                             elif method == "chat.send":
+                                if rpc_id is not None:
+                                    await transport._send_response(rpc_id, {"accepted": True})
                                 ws_tg.start_soon(self.handle_chat_send, params, runtime, transport)
                             elif method == "run.cancel":
                                 await self.handle_run_cancel(params, websocket)
+                                if rpc_id is not None:
+                                    await transport._send_response(rpc_id, {"cancelled": True})
                             elif method == "project.list":
                                 configured_aliases = list(runtime.project_aliases())
                                 discovered = self._discover_projects(configured_aliases)
@@ -330,9 +345,9 @@ class TunadishBackend:
                                 await self._handle_review_list_json(params, transport)
                             # --- rawq code search/map ---
                             elif method == "code.search":
-                                ws_tg.start_soon(self._handle_code_search, params, runtime, transport)
+                                await self._handle_code_search(params, runtime, transport)
                             elif method == "code.map":
-                                ws_tg.start_soon(self._handle_code_map, params, runtime, transport)
+                                await self._handle_code_map(params, runtime, transport)
                             # --- JSON-RPC direct command methods ---
                             elif method == "help":
                                 await self._dispatch_rpc_command("help", "", params, runtime, transport)
@@ -439,14 +454,27 @@ class TunadishBackend:
                                 await self._handle_engine_list(runtime, transport)
                             else:
                                 logger.warning("Unknown JSON-RPC method: %s", method)
+                                if rpc_id is not None:
+                                    transport._pending_rpc_id = None  # 소비 안 된 rpc_id 정리
+                                    await transport._send_error(rpc_id, -32601, f"Method not found: {method}")
                         except Exception as e:
                             logger.error("Error handling websocket message: %s", e)
+                            # 미소비 rpc_id가 남아있으면 에러 response 전송
+                            if rpc_id is not None and transport._pending_rpc_id is not None:
+                                transport._pending_rpc_id = None
+                                await transport._send_error(rpc_id, -32000, str(e))
                 except Exception:
                     pass
         except* Exception as eg:
             logger.debug("ws_handler task group exited with exceptions: %s", eg)
         finally:
             self._active_transports.discard(transport)
+            # WS disconnect 시 해당 transport의 활성 run cancel
+            for conv_id, ref in list(self.run_map.items()):
+                task = self.running_tasks.get(ref)
+                if task is not None and not task.cancel_requested.is_set():
+                    task.cancel_requested.set()
+                    logger.info("Cancelled orphan run for %s on ws disconnect", conv_id)
 
     # --- Structured JSON RPC handlers (context panel) ---
 
@@ -1138,12 +1166,15 @@ class TunadishBackend:
                 logger.warning("Run already in progress for conversation %s", conv_id)
                 return
 
+            run_timeout = params.get("timeout")
             async with lock:
-                await self._execute_run(conv_id, text, runtime, transport)
+                await self._execute_run(conv_id, text, runtime, transport, timeout=run_timeout)
         except Exception as e:
             logger.exception("Unhandled error in handle_chat_send")
 
-    async def _execute_run(self, conv_id: str, text: str, runtime: TransportRuntime, transport: TunadishTransport):
+    _RUN_TIMEOUT: int = 300  # 기본 실행 타임아웃 (초)
+
+    async def _execute_run(self, conv_id: str, text: str, runtime: TransportRuntime, transport: TunadishTransport, *, timeout: int | None = None):
         # 실행 시작 알림
         await transport._send_notification("run.status", {
             "conversation_id": conv_id, "status": "running",
@@ -1226,18 +1257,24 @@ class TunadishBackend:
                 text=enriched_text,
             )
 
-            await handle_message(
-                cfg=cfg,
-                journal=self._journal,
-                runner=rr.runner,
-                incoming=incoming,
-                resume_token=effective_token,
-                context=resolved.context,
-                running_tasks=self.running_tasks,
-                progress_ref=progress_ref,
-                project_sessions=self._project_sessions,
-                on_thread_known=self._make_conv_token_saver(conv_id),
-            )
+            run_timeout = timeout or self._RUN_TIMEOUT
+            with anyio.fail_after(run_timeout):
+                await handle_message(
+                    cfg=cfg,
+                    journal=self._journal,
+                    runner=rr.runner,
+                    incoming=incoming,
+                    resume_token=effective_token,
+                    context=resolved.context,
+                    running_tasks=self.running_tasks,
+                    progress_ref=progress_ref,
+                    project_sessions=self._project_sessions,
+                    on_thread_known=self._make_conv_token_saver(conv_id),
+                )
+        except TimeoutError:
+            logger.error("Run timed out after %ds for %s", timeout or self._RUN_TIMEOUT, conv_id)
+            if progress_ref:
+                await transport.edit(ref=progress_ref, message=RenderedMessage(text=f"**⏱️ 타임아웃:** {timeout or self._RUN_TIMEOUT}초 초과로 실행이 중단되었습니다."))
         except Exception as e:
             logger.exception("Error during _execute_run")
             if progress_ref:
