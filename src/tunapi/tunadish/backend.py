@@ -16,6 +16,7 @@ from ..core.chat_prefs import ChatPrefsStore
 from ..core.project_sessions import ProjectSessionStore
 from ..core.memory_facade import ProjectMemoryFacade
 from ..core.commands import parse_command
+from ..runners.run_options import EngineRunOptions, apply_run_options
 from ..logging import get_logger
 
 from .transport import TunadishTransport
@@ -162,6 +163,8 @@ class TunadishBackend:
     async def _ws_handler(self, runtime: TransportRuntime, final_notify: bool, websocket):
         transport = TunadishTransport(websocket)
         self._active_transports.add(transport)
+        remote = getattr(websocket, "remote_address", None)
+        logger.info("tunadish ws connected: %s (active=%d)", remote, len(self._active_transports))
 
         try:
             async with anyio.create_task_group() as ws_tg:
@@ -171,6 +174,7 @@ class TunadishBackend:
                             data = json.loads(message)
                             method = data.get("method")
                             params = data.get("params", {})
+                            logger.debug("tunadish ws recv: method=%s id=%s", method, data.get("id"))
                             rpc_id = data.get("id")
 
                             # JSON-RPC 2.0: rpc_id가 있고 fire-and-forget이 아닌 메서드는
@@ -468,6 +472,7 @@ class TunadishBackend:
         except* Exception as eg:
             logger.debug("ws_handler task group exited with exceptions: %s", eg)
         finally:
+            logger.info("tunadish ws disconnected: %s (remaining=%d)", remote, len(self._active_transports) - 1)
             self._active_transports.discard(transport)
             # WS disconnect 시 해당 transport의 활성 run cancel
             for conv_id, ref in list(self.run_map.items()):
@@ -614,6 +619,11 @@ class TunadishBackend:
             ],
             "markdown": dto.markdown,
         }
+        # conversation별 설정 override
+        conv_s = self.context_store.get_conv_settings(conv_id)
+        conv_s_dict = conv_s.to_dict()
+        if conv_s_dict:
+            result["conv_settings"] = conv_s_dict
         await transport._send_notification("project.context.result", result)
 
     async def _handle_branch_list_json(self, params: dict[str, Any], runtime: TransportRuntime, transport: TunadishTransport):
@@ -738,8 +748,13 @@ class TunadishBackend:
         # active_branch_id 갱신
         await self.context_store.set_active_branch(conv_id, branch.branch_id)
 
-        # 브랜치 전용 채널에 분기점 컨텍스트를 journal에 저장
+        # 브랜치 전용 채널 설정: 부모 conv의 context 복사 + settings 상속
         branch_channel = f"branch:{branch.branch_id}"
+        from ..context import RunContext as _BranchRC
+        await self.context_store.set_context(branch_channel, _BranchRC(project=project), label=label)
+        await self.context_store.copy_conv_settings(conv_id, branch_channel)
+
+        # 브랜치 전용 채널에 분기점 컨텍스트를 journal에 저장
         context_summary = await self._build_branch_context(conv_id, checkpoint_id)
         if context_summary:
             import uuid
@@ -1086,12 +1101,40 @@ class TunadishBackend:
         """RPC 메서드를 커맨드 핸들러로 라우팅. 응답은 command.result notification으로 전송."""
         conv_id = params.get("conversation_id", "__rpc__")
 
+        # 설정 변경 커맨드: conv settings도 동시 업데이트
+        settings_update: dict[str, str | None] = {}
+        if cmd == "model" and args.strip():
+            parts = args.strip().split(None, 1)
+            engine = parts[0] if parts else None
+            model = parts[1].strip() if len(parts) > 1 else None
+            if engine:
+                settings_update["engine"] = engine
+            if model and model.lower() != "clear":
+                settings_update["model"] = model
+            elif model and model.lower() == "clear":
+                settings_update["model"] = None
+        elif cmd == "trigger" and args.strip():
+            settings_update["trigger_mode"] = args.strip()
+        elif cmd == "persona" and args.strip() and not args.strip().startswith("list"):
+            # persona set/add — 첫 토큰이 persona 이름
+            persona_name = args.strip().split()[0] if args.strip() else None
+            if persona_name and persona_name not in ("list", "remove", "delete"):
+                settings_update["persona"] = persona_name
+
         async def send(msg: RenderedMessage) -> None:
-            await transport._send_notification("command.result", {
+            payload: dict[str, Any] = {
                 "command": cmd,
                 "conversation_id": conv_id,
                 "text": msg.text or "",
-            })
+            }
+            # 설정 변경 성공 시 conv settings 업데이트 + 응답에 포함
+            if settings_update and conv_id != "__rpc__":
+                updated = await self.context_store.update_conv_settings(conv_id, **settings_update)
+                payload["settings"] = updated.to_dict()
+            payload_settings = self.context_store.get_conv_settings(conv_id).to_dict()
+            if payload_settings:
+                payload.setdefault("settings", payload_settings)
+            await transport._send_notification("command.result", payload)
 
         return await dispatch_command(
             cmd, args,
@@ -1214,9 +1257,10 @@ class TunadishBackend:
                     if cross_summary:
                         enriched_text = f"{cross_summary}\n---\n{enriched_text}"
 
-            # ChatPrefs에서 엔진/모델 override 조회
-            engine_override = None
-            if self._chat_prefs:
+            # conv settings → ChatPrefs → project default 순으로 엔진/모델 결정
+            conv_settings = self.context_store.get_conv_settings(conv_id)
+            engine_override = conv_settings.engine
+            if not engine_override and self._chat_prefs:
                 prefs_engine = await self._chat_prefs.get_default_engine(context_conv_id)
                 if prefs_engine:
                     engine_override = prefs_engine
@@ -1235,12 +1279,17 @@ class TunadishBackend:
             else:
                 effective_token = resolved.resume_token
 
-            # ChatPrefs 엔진이 설정되어 있으면 resolve_runner에 반영
-            final_engine_override = resolved.engine_override or engine_override
+            # conv settings → ChatPrefs → resolve_message 순으로 엔진 override
+            final_engine_override = engine_override or resolved.engine_override
             rr = runtime.resolve_runner(
                 resume_token=effective_token,
                 engine_override=final_engine_override,
             )
+
+            # conv settings 모델 override → ChatPrefs 모델 override
+            model_override = conv_settings.model
+            if not model_override and self._chat_prefs and final_engine_override:
+                model_override = await self._chat_prefs.get_engine_model(context_conv_id, final_engine_override)
 
             cwd = runtime.resolve_run_cwd(resolved.context)
             run_base_token = set_run_base_dir(cwd)
@@ -1258,7 +1307,8 @@ class TunadishBackend:
             )
 
             run_timeout = timeout or self._RUN_TIMEOUT
-            with anyio.fail_after(run_timeout):
+            run_options = EngineRunOptions(model=model_override) if model_override else None
+            with apply_run_options(run_options), anyio.fail_after(run_timeout):
                 await handle_message(
                     cfg=cfg,
                     journal=self._journal,
