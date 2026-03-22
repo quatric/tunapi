@@ -37,8 +37,8 @@ Four transports (Mattermost, Slack, Telegram, Tunadish) share the same runtime, 
 ### Core Protocols (`src/tunapi/`)
 
 - **Transport** (`transport.py`) — send/edit/delete messages
-- **Runner** (`runner.py`) — execute agent CLI, yield `TunapiEvent` stream. `JsonlSubprocessRunner` is the base class
-- **RunnerBridge** (`runner_bridge.py`) — track progress with 5s tick refresh
+- **Runner** (`runner.py`) — execute agent CLI, yield `TunapiEvent` stream. `JsonlSubprocessRunner` is the base class. Session ID mismatch (CLI creates new session for expired token) is handled gracefully with warning log
+- **RunnerBridge** (`runner_bridge.py`) — track progress with 5s tick refresh. `on_started` callback captures CLI-reported model for per-message metadata
 - **Presenter** (`presenter.py`) — render `ProgressState` to `RenderedMessage`
 - **Journal** (`journal.py`) — JSONL journal for conversation handoff, PendingRunLedger
 
@@ -112,7 +112,7 @@ WebSocket-based transport for the tunadish web client. JSON-RPC 2.0 protocol.
 - `session_store.py` — per-conversation resume token store (`~/.tunapi/tunadish_conv_sessions.json`)
 - `context_store.py` — per-conversation project/branch binding
 - `presenter.py` — progress rendering for WebSocket client
-- `rawq_bridge.py` — code search/map integration
+- `rawq_bridge.py` — code search/map integration with `_DEFAULT_EXCLUDE` patterns for scoped indexing
 
 ### Engines (`src/tunapi/runners/`)
 
@@ -128,7 +128,7 @@ Entry-point groups in `pyproject.toml`:
 
 ### Configuration (`settings.py`, `config.py`)
 
-Pydantic settings from `~/.tunapi/tunapi.toml`. Env prefix: `TUNAPI__`. `MATTERMOST_TOKEN` env var supported for Mattermost token; `TELEGRAM_TOKEN` for Telegram; `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN` for Slack. Per-project `chat_id` maps channels to engines. `[roundtable]` section configures multi-agent roundtable (engines, rounds, max_rounds).
+Pydantic settings from `~/.tunapi/tunapi.toml`. Env prefix: `TUNAPI__`. `MATTERMOST_TOKEN` env var supported for Mattermost token; `TELEGRAM_TOKEN` for Telegram; `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN` for Slack. Per-project `chat_id` maps channels to engines. `[roundtable]` section configures multi-agent roundtable (engines, rounds, max_rounds). `TUNAPI_LOG_FILE` env var enables JSON log file with full tracebacks. `RAWQ_BIN` env var overrides rawq binary path.
 
 ### Engine Models (`src/tunapi/engine_models.py`)
 
@@ -140,6 +140,10 @@ Dynamic model discovery per engine with fallback registry. `!models` command for
 - `find_engine_for_model(model)` — reverse lookup: given a model ID, returns the engine it belongs to
 - `shorten_model(model)` — display shortener (`claude-opus-4-6[1m]` → `opus4.6`)
 - Results cached in-process with 1-hour TTL; `invalidate_cache()` to refresh
+
+### Transport Runtime (`src/tunapi/transport_runtime.py`)
+
+`resolve_runner()` priority: `engine_override` > `resume_token.engine` > default engine. This ensures explicit engine selection (via `!model`, conv_settings) always takes precedence over stored resume tokens from a different engine.
 
 ## Test Patterns
 
