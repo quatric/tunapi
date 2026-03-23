@@ -3,7 +3,7 @@
 # tunaPi
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.14+](https://img.shields.io/badge/python-3.14+-blue.svg)](https://www.python.org/downloads/)
 [![Tests](https://img.shields.io/github/actions/workflow/status/hang-in/tunaPi/release.yml?label=tests)](https://github.com/hang-in/tunaPi/actions)
 [![GitHub release](https://img.shields.io/github/v/release/hang-in/tunaPi?include_prereleases)](https://github.com/hang-in/tunaPi/releases)
 
@@ -54,10 +54,13 @@ tunaPi:  ✓ done · 23s · 3 files changed
 ### 주요 기능
 
 - **멀티 에이전트 토론** — `!rt "주제"` 로 Claude, Gemini, Codex가 순서대로 의견을 냄
+- **대화 브랜칭** — 특정 메시지에서 분기하여 독립 대화 → 채택(adopt)으로 메인에 병합
+- **코드 인덱싱** — rawq 기반 시맨틱 검색, 메시지에 관련 코드 자동 첨부
 - **채널별 프로젝트/엔진 매핑** — 채널마다 다른 프로젝트, 다른 AI를 쓸 수 있음
 - **실시간 진행 표시** — `working · claude/opus4.6 · 12s · step 4` 형태로 진행 상황 표시
 - **세션 이어가기** — 대화를 끊었다 다시 이어도 컨텍스트 유지
 - **세부 모델 설정** — `!model claude claude-opus-4-6` 으로 엔진뿐 아니라 모델까지 지정
+- **크로스 세션 컨텍스트** — 같은 프로젝트의 다른 세션 활동을 자동 요약하여 전달
 
 ### 테스트 현황
 
