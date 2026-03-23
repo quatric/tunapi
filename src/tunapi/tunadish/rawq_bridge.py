@@ -253,6 +253,32 @@ def format_context_block(search_result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_map_block(map_result: dict[str, Any]) -> str:
+    """rawq map 결과를 에이전트 주입용 프로젝트 구조 블록으로 변환.
+
+    Args:
+        map_result: rawq map --json 의 출력
+
+    Returns:
+        마크다운 문자열. 결과가 없으면 빈 문자열.
+    """
+    files = map_result.get("files", [])
+    if not files:
+        return ""
+
+    lines = ["<project_structure>"]
+    for f in files:
+        path = f.get("path", "")
+        symbols = f.get("symbols", [])
+        if not symbols:
+            lines.append(f"  {path}")
+            continue
+        sym_names = [s.get("name", "") for s in symbols if s.get("name")]
+        lines.append(f"  {path} ({', '.join(sym_names[:8])}{'...' if len(sym_names) > 8 else ''})")
+    lines.append("</project_structure>")
+    return "\n".join(lines)
+
+
 # ── 버전 확인 & 업데이트 체크 ──
 
 async def get_version() -> str | None:

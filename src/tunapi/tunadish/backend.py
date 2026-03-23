@@ -742,9 +742,12 @@ class TunadishBackend:
         if not project:
             return
 
-        # 현재 활성 브랜치를 부모로 설정
-        meta = self.context_store._cache.get(conv_id)
-        parent_id = getattr(meta, "active_branch_id", None) if meta else None
+        # 클라이언트가 parent_branch_id를 명시하면 우선, 아니면 active_branch_id 폴백
+        if "parent_branch_id" in params:
+            parent_id = params["parent_branch_id"]  # null 명시 → 루트 브랜치
+        else:
+            meta = self.context_store._cache.get(conv_id)
+            parent_id = getattr(meta, "active_branch_id", None) if meta else None
 
         # 라벨 자동 생성: 기존 브랜치(모든 상태 포함) 수 기반 카운터 — 이름 충돌 방지
         if not label:
@@ -1306,6 +1309,19 @@ class TunadishBackend:
             else:
                 effective_token = resolved.resume_token
 
+            # 새 세션(resume token 없음) 시작 시 code map 주입
+            if effective_token is None and ambient_ctx:
+                _proj = getattr(ambient_ctx, "project", None)
+                if _proj:
+                    from . import rawq_bridge as _rb
+                    _proj_path = self._resolve_project_path(_proj, runtime)
+                    if _proj_path and _rb.is_available():
+                        _map = await _rb.get_map(project_path=_proj_path, depth=2)
+                        _map_block = _rb.format_map_block(_map) if _map else ""
+                        if _map_block:
+                            enriched_text = f"{_map_block}\n\n{enriched_text}"
+                            logger.info("rawq.session_map_injected", project=_proj)
+
             # conv settings → ChatPrefs → resolve_message 순으로 엔진 override
             final_engine_override = engine_override or resolved.engine_override
             rr = runtime.resolve_runner(
@@ -1568,23 +1584,43 @@ class TunadishBackend:
         if not project_path:
             return text
 
+        # 짧은 질문에는 더 많은 코드 컨텍스트 제공
+        text_len = len(text)
+        if text_len < 100:
+            token_budget = 4000
+        elif text_len < 500:
+            token_budget = 2000
+        else:
+            token_budget = 1000
+
         result = await rawq_bridge.search(
             query=text,
             project_path=project_path,
             top=5,
-            token_budget=2000,
+            token_budget=token_budget,
             threshold=0.5,
         )
 
-        if not result:
-            return text
+        context_block = rawq_bridge.format_context_block(result) if result else ""
 
-        context_block = rawq_bridge.format_context_block(result)
-        if not context_block:
-            return text
+        if context_block:
+            logger.info(
+                "rawq.enrich",
+                project=project_name,
+                results=len(result.get("results", [])),
+                token_budget=token_budget,
+            )
+            return f"{context_block}\n\n---\n\n{text}"
 
-        # 컨텍스트를 메시지 앞에 첨부
-        return f"{context_block}\n\n---\n\n{text}"
+        # 검색 결과 0건 → code map 폴백으로 프로젝트 구조 제공
+        map_result = await rawq_bridge.get_map(project_path=project_path, depth=2)
+        map_block = rawq_bridge.format_map_block(map_result) if map_result else ""
+        if map_block:
+            logger.info("rawq.enrich.map_fallback", project=project_name)
+            return f"{map_block}\n\n---\n\n{text}"
+
+        logger.info("rawq.enrich.no_results", project=project_name)
+        return text
 
     async def _handle_code_search(self, params: dict[str, Any], runtime: TransportRuntime, transport: TunadishTransport):
         """code.search RPC 처리 — ContextPanel 코드 검색용."""
