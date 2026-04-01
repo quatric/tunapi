@@ -9,9 +9,15 @@
 
 채팅앱에서 AI 코딩 에이전트를 바로 쓰게 해주는 브릿지
 
-[**한국어**](#한국어) | [English](docs/README_EN.md) | [日本語](docs/README_JP.md)
+Discord · Mattermost · Slack · Telegram · Web
 
-<!-- TODO: 데모 GIF 추가 -->
+**Claude Code · Codex · Gemini CLI · OpenCode · Pi**
+
+```sh
+uv tool install -U tunapi && tunapi
+```
+
+[**한국어**](#한국어) | [English](docs/README_EN.md) | [日本語](docs/README_JP.md)
 
 </div>
 
