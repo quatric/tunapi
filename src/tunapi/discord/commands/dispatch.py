@@ -110,6 +110,13 @@ async def dispatch_command(
     try:
         result = await backend.handle(ctx)
     except Exception as exc:
+        cancel_exc = anyio.get_cancelled_exc_class()
+        if isinstance(exc, cancel_exc) or "context cancel" in str(exc).lower():
+            logger.debug(
+                "command.cancelled",
+                command=command_id,
+            )
+            return True
         logger.exception(
             "command.failed",
             command=command_id,

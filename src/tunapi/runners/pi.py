@@ -526,8 +526,12 @@ class PiRunner(MsgspecJsonlRunnerMixin, ResumeTokenMixin, JsonlSubprocessRunner)
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
         state: PiStreamState,
+        stderr: str = "",
     ) -> list[TunapiEvent]:
         message = f"pi failed (rc={rc})."
+        if stderr.strip():
+            detail = stderr.strip().splitlines()[-1]
+            message = f"pi failed (rc={rc}): {detail}"
         resume_for_completed = found_session or resume or state.resume
         return [
             self.note_event(message, state=state),

@@ -314,8 +314,12 @@ class JsonlSubprocessRunner(BaseRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
         state: Any,
+        stderr: str = "",
     ) -> list[TunapiEvent]:
         message = f"{self.tag()} failed (rc={rc})."
+        if stderr.strip():
+            detail = stderr.strip().splitlines()[-1]
+            message = f"{self.tag()} failed (rc={rc}): {detail}"
         resume_for_completed = found_session or resume
         return [
             self.note_event(message, state=state),
@@ -676,6 +680,7 @@ class JsonlSubprocessRunner(BaseRunner):
 
             rc: int | None = None
             stream = JsonlStreamState(expected_session=resume)
+            stderr_lines: list[str] = []
 
             async with anyio.create_task_group() as tg:
                 tg.start_soon(
@@ -683,6 +688,7 @@ class JsonlSubprocessRunner(BaseRunner):
                     proc.stderr,
                     logger,
                     tag,
+                    stderr_lines,
                 )
                 async for evt in self._iter_jsonl_events(
                     stdout=proc.stdout,
@@ -706,6 +712,7 @@ class JsonlSubprocessRunner(BaseRunner):
                     resume=resume,
                     found_session=found_session,
                     state=state,
+                    stderr="\n".join(stderr_lines),
                 )
                 for evt in events:
                     if isinstance(evt, CompletedEvent):

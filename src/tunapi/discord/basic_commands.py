@@ -33,6 +33,67 @@ def register_basic_commands(
     pycord_bot = bot.bot
 
     @pycord_bot.slash_command(
+        name="usage", description="Show aggregate AI engine usage recorded by Tunapi"
+    )
+    async def usage_command(ctx: discord.ApplicationContext) -> None:
+        if ctx.guild is None:
+            await ctx.respond(
+                "This command can only be used in a server.", ephemeral=True
+            )
+            return
+        if not await require_allowed_user(ctx):
+            return
+
+        from ..usage_store import usage_snapshot
+        from ..account_pool import get_all_account_statuses
+
+        account_statuses = get_all_account_statuses()
+        engines = await usage_snapshot()
+
+        lines = ["## 📊 Tunapi Account Pools & Usage", ""]
+
+        if account_statuses:
+            lines.append("**Configured Account Pools:**")
+            for engine_name, accs in account_statuses.items():
+                lines.append(f"**{engine_name.capitalize()} Accounts:**")
+                for acc in accs:
+                    if acc.get("is_exhausted"):
+                        active_tag = "🔴 **[QUOTA / COOLDOWN]**"
+                    elif acc.get("is_active"):
+                        active_tag = "🟢 **[ACTIVE]**"
+                    else:
+                        active_tag = "⚪ [Standby]"
+                    tier_str = f" ({acc['tier']})" if "tier" in acc else ""
+                    lines.append(
+                        f"  • {active_tag} `{acc['email']}`{tier_str} — {acc['status']}"
+                    )
+            lines.append("")
+
+        lines.append("**Recorded Engine Usage:**")
+        has_stats = False
+        for engine in ("antigravity", "claude", "codex", "opencode", "codex_app"):
+            stats = engines.get(engine) if engines else None
+            if not stats:
+                continue
+            has_stats = True
+            runs = int(stats.get("runs", 0))
+            tokens = int(stats.get("total_tokens", 0))
+            elapsed = float(stats.get("elapsed_seconds", 0))
+            line = f"- **{engine}**: {runs} run{'s' if runs != 1 else ''}"
+            if tokens:
+                line += f", {tokens:,} tokens"
+            cost = float(stats.get("cost_usd", 0))
+            if cost:
+                line += f", ${cost:.4f}"
+            line += f", {elapsed:.1f}s"
+            lines.append(line)
+
+        if not has_stats:
+            lines.append("_No completed-run metrics recorded yet for this session._")
+
+        await ctx.respond("\n".join(lines), ephemeral=True)
+
+    @pycord_bot.slash_command(
         name="status", description="Show current channel context and status"
     )
     async def status_command(ctx: discord.ApplicationContext) -> None:

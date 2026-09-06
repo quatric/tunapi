@@ -40,3 +40,15 @@ def test_claude_schema_parses_fixture(fixture: str) -> None:
     errors = _decode_fixture(fixture)
 
     assert not errors, f"{fixture} had {len(errors)} errors: " + "; ".join(errors[:5])
+
+
+def test_claude_schema_parses_tool_progress_event() -> None:
+    event = claude_schema.decode_stream_json_line(
+        b'{"type":"tool_progress","tool_use_id":"toolu_123",'
+        b'"tool_name":"Bash","elapsed_time_seconds":30.0,'
+        b'"uuid":"uuid","session_id":"session","unexpected":"ignored"}'
+    )
+
+    assert isinstance(event, claude_schema.StreamToolProgressMessage)
+    assert event.tool_use_id == "toolu_123"
+    assert event.elapsed_time_seconds == 30.0

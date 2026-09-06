@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ..backends import EngineBackend, EngineConfig
+from ..account_pool import looks_exhausted, rotate_account, select_account
 from ..events import EventFactory
 from ..logging import get_logger
 from ..model import Action, ActionKind, EngineId, ResumeToken, TunapiEvent
@@ -37,6 +38,18 @@ class ClaudeStreamState:
     pending_actions: dict[str, Action] = field(default_factory=dict)
     last_assistant_text: str | None = None
     note_seq: int = 0
+    account_home: str | None = None
+
+
+def _get_account_homes() -> tuple[str, ...]:
+    accounts_dir = Path("/var/lib/tunapi-accounts")
+    if not accounts_dir.is_dir():
+        return ()
+    found = sorted(str(p) for p in accounts_dir.iterdir() if p.is_dir() and p.name.startswith("claude-"))
+    return tuple(found)
+
+
+_ACCOUNT_MARKER = "/var/lib/tunapi-accounts/claude-active"
 
 
 def _normalize_tool_result(content: Any) -> str:
@@ -186,6 +199,8 @@ def translate_claude_event(
             model = event.model
             if isinstance(model, str) and model:
                 meta["model"] = model
+            if state.account_home:
+                meta["account"] = Path(state.account_home).name
             token = ResumeToken(engine=ENGINE, value=session_id)
             event_title = str(model) if isinstance(model, str) and model else title
             return [factory.started(token, title=event_title, meta=meta or None)]
@@ -268,6 +283,24 @@ def translate_claude_event(
 
             resume = ResumeToken(engine=ENGINE, value=event.session_id)
             error = None if ok else (_extract_error(event) or result_text or None)
+            if (
+                not ok
+                and error
+                and (
+                    "context cancel" in str(error).lower()
+                    or "context canceled" in str(error).lower()
+                )
+            ):
+                if result_text and result_text.strip():
+                    ok = True
+                    error = None
+            if not ok and looks_exhausted(error or result_text):
+                rotate_account(
+                    _get_account_homes(),
+                    marker=_ACCOUNT_MARKER,
+                    current=state.account_home,
+                    mark_exhausted=True,
+                )
             usage = _usage_payload(event)
 
             return [
@@ -280,6 +313,17 @@ def translate_claude_event(
                 )
             ]
         case claude_schema.StreamRateLimitEvent():
+            rate_info = getattr(event, "rate_limit_info", None)
+            status = str(getattr(rate_info, "status", "") or "").lower()
+            resets_at = getattr(rate_info, "resetsAt", None)
+            if status and status not in {"allowed", "allowed_warning"}:
+                rotate_account(
+                    _get_account_homes(),
+                    marker=_ACCOUNT_MARKER,
+                    current=state.account_home,
+                    mark_exhausted=True,
+                    exhausted_until=float(resets_at) if resets_at else None,
+                )
             logger.warning(
                 "claude rate limit event",
                 engine=ENGINE,
@@ -353,11 +397,20 @@ class ClaudeRunner(MsgspecJsonlRunnerMixin, ResumeTokenMixin, JsonlSubprocessRun
         if self.use_api_billing is not True:
             env = dict(os.environ)
             env.pop("ANTHROPIC_API_KEY", None)
+            if isinstance(state, ClaudeStreamState) and state.account_home:
+                env["TUNAPI_ACCOUNT_HOME"] = state.account_home
+            env["CLAUDE_CODE_TMPDIR"] = "/tmp/tunapi-claude"
             return env
         return None
 
     def new_state(self, prompt: str, resume: ResumeToken | None) -> ClaudeStreamState:
-        return ClaudeStreamState()
+        account_home = select_account(
+            _get_account_homes(),
+            marker=_ACCOUNT_MARKER,
+            resume_token=resume.value if resume else None,
+            session_pattern=".claude/projects/**/{token}.jsonl",
+        )
+        return ClaudeStreamState(account_home=account_home)
 
     def start_run(
         self,
@@ -406,8 +459,12 @@ class ClaudeRunner(MsgspecJsonlRunnerMixin, ResumeTokenMixin, JsonlSubprocessRun
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
         state: ClaudeStreamState,
+        stderr: str = "",
     ) -> list[TunapiEvent]:
         message = f"claude failed (rc={rc})."
+        if stderr.strip():
+            detail = stderr.strip().splitlines()[-1]
+            message = f"claude failed (rc={rc}): {detail}"
         resume_for_completed = found_session or resume
         return [
             self.note_event(message, state=state, ok=False),

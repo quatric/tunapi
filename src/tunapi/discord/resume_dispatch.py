@@ -54,20 +54,21 @@ async def _wait_for_resume(running_task) -> ResumeToken | None:
         return running_task.resume
     resume: ResumeToken | None = None
 
-    async with anyio.create_task_group() as tg:
+    with anyio.move_on_after(300):
+        async with anyio.create_task_group() as tg:
 
-        async def wait_resume() -> None:
-            nonlocal resume
-            await running_task.resume_ready.wait()
-            resume = running_task.resume
-            tg.cancel_scope.cancel()
+            async def wait_resume() -> None:
+                nonlocal resume
+                await running_task.resume_ready.wait()
+                resume = running_task.resume
+                tg.cancel_scope.cancel()
 
-        async def wait_done() -> None:
-            await running_task.done.wait()
-            tg.cancel_scope.cancel()
+            async def wait_done() -> None:
+                await running_task.done.wait()
+                tg.cancel_scope.cancel()
 
-        tg.start_soon(wait_resume)
-        tg.start_soon(wait_done)
+            tg.start_soon(wait_resume)
+            tg.start_soon(wait_done)
 
     return resume
 

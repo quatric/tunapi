@@ -221,8 +221,12 @@ class GeminiRunner(MsgspecJsonlRunnerMixin, ResumeTokenMixin, JsonlSubprocessRun
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
         state: GeminiStreamState,
+        stderr: str = "",
     ) -> list[TunapiEvent]:
         message = f"gemini failed (rc={rc})."
+        if stderr.strip():
+            detail = stderr.strip().splitlines()[-1]
+            message = f"gemini failed (rc={rc}): {detail}"
         return [
             self.note_event(message, state=state, ok=False),
             state.factory.completed_error(

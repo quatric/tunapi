@@ -8,6 +8,11 @@ import anyio
 
 import contextlib
 
+from .account_pool import (
+    are_all_accounts_exhausted,
+    looks_exhausted,
+    rotate_account,
+)
 from .context import RunContext
 from .core.project_sessions import ProjectSessionStore
 from .journal import (
@@ -203,8 +208,8 @@ class ProgressEdits:
 
     async def _run_progress_loop(self) -> None:
         while True:
-            while self.rendered_seq == self.event_seq:
-                with anyio.move_on_after(5.0):
+            if self.rendered_seq == self.event_seq:
+                with anyio.move_on_after(1.5):
                     try:
                         await self.signal_recv.receive()
                     except anyio.EndOfStream:
@@ -227,13 +232,12 @@ class ProgressEdits:
                     message_id=self.progress_ref.message_id,
                     rendered=rendered.text,
                 )
-                edited = await self.transport.edit(
+                await self.transport.edit(
                     ref=self.progress_ref,
                     message=rendered,
                     wait=False,
                 )
-                if edited is not None:
-                    self.last_rendered = rendered
+                self.last_rendered = rendered
 
             self.rendered_seq = seq_at_render
 
@@ -747,6 +751,13 @@ async def _handle_run_completed(
             label="done",
         )
         await cfg.transport.edit(ref=progress_ref, message=summary, wait=False)
+    from .usage_store import record_usage
+
+    await record_usage(
+        runner.engine,
+        completed.usage,
+        elapsed_seconds=elapsed,
+    )
     await _finalize_run(
         journal,
         run_id,
@@ -871,49 +882,109 @@ async def handle_message(
         running_tasks[progress_ref] = running_task
 
     cancel_exc_type = anyio.get_cancelled_exc_class()
-    edits_scope = anyio.CancelScope()
 
-    async def run_edits() -> None:
-        try:
-            with edits_scope:
-                await edits.run()
-        except cancel_exc_type:
-            # Edits are best-effort; cancellation should not bubble into the task group.
-            return
-
+    current_resume_token = resume_token
+    max_account_retries = 3
+    current_account_try = 0
     outcome = RunOutcome()
     error: Exception | None = None
 
-    async with anyio.create_task_group() as tg:
-        if progress_ref is not None:
-            tg.start_soon(run_edits)
+    while current_account_try < max_account_retries:
+        current_account_try += 1
+        outcome = RunOutcome()
+        error = None
+        edits_scope = anyio.CancelScope()
 
-        try:
-            outcome = await run_runner_with_cancel(
-                runner,
-                prompt=runner_text,
-                resume_token=resume_token,
-                edits=edits,
-                running_task=running_task,
-                on_thread_known=on_thread_known,
-                on_started=on_started,
-            )
-        except Exception as exc:
-            error = exc
-            logger.exception(
-                "handle.runner_failed",
-                error=str(exc),
-                error_type=exc.__class__.__name__,
-            )
-        finally:
-            if running_task is not None and running_tasks is not None:
-                running_task.done.set()
-                if progress_ref is not None:
-                    running_tasks.pop(progress_ref, None)
-            if not outcome.cancelled and error is None:
-                # Give pending progress edits a chance to flush if they're ready.
-                await anyio.sleep(0)
-            edits_scope.cancel()
+        async def run_edits(scope: anyio.CancelScope = edits_scope) -> None:
+            try:
+                with scope:
+                    await edits.run()
+            except cancel_exc_type:
+                # Edits are best-effort; cancellation should not bubble into the task group.
+                return
+
+        async with anyio.create_task_group() as tg:
+            if progress_ref is not None:
+                tg.start_soon(run_edits, edits_scope)
+
+            try:
+                outcome = await run_runner_with_cancel(
+                    runner,
+                    prompt=runner_text,
+                    resume_token=current_resume_token,
+                    edits=edits,
+                    running_task=running_task,
+                    on_thread_known=on_thread_known,
+                    on_started=on_started,
+                )
+            except Exception as exc:
+                error = exc
+                logger.exception(
+                    "handle.runner_failed",
+                    error=str(exc),
+                    error_type=exc.__class__.__name__,
+                )
+            finally:
+                if not outcome.cancelled and error is None:
+                    # Give pending progress edits a chance to flush if they're ready.
+                    await anyio.sleep(0)
+                edits_scope.cancel()
+
+        # Check if the run failed due to rate limits / quota exhaustion
+        is_exhausted = False
+        err_msg = ""
+        if error is not None:
+            err_msg = str(error)
+            is_exhausted = looks_exhausted(err_msg)
+        elif outcome.completed is not None and not outcome.completed.ok:
+            err_msg = outcome.completed.error or outcome.completed.answer or ""
+            is_exhausted = looks_exhausted(err_msg)
+
+        if (
+            is_exhausted
+            and not outcome.cancelled
+            and current_account_try < max_account_retries
+        ):
+            engine_homes = None
+            engine_marker = None
+            if runner.engine == "claude":
+                from .runners.claude import _ACCOUNT_HOMES, _ACCOUNT_MARKER
+
+                engine_homes = _ACCOUNT_HOMES
+                engine_marker = _ACCOUNT_MARKER
+            elif runner.engine == "antigravity":
+                from .runners.antigravity import _ACCOUNT_HOMES, _ACCOUNT_MARKER
+
+                engine_homes = _ACCOUNT_HOMES
+                engine_marker = _ACCOUNT_MARKER
+
+            if engine_homes and engine_marker:
+                # If we have accounts, mark the current one exhausted and rotate
+                if not are_all_accounts_exhausted(engine_homes):
+                    rotate_account(
+                        engine_homes,
+                        marker=engine_marker,
+                        current=None,
+                        mark_exhausted=True,
+                    )
+                    # Check if there is still a healthy alternative account
+                    if not are_all_accounts_exhausted(engine_homes):
+                        logger.warning(
+                            "account_pool.rotating_exhausted_account",
+                            engine=runner.engine,
+                            attempt=current_account_try,
+                            error=err_msg,
+                        )
+                        # Reset resume token so backup account starts clean
+                        current_resume_token = None
+                        continue
+
+        break
+
+    if running_task is not None and running_tasks is not None:
+        running_task.done.set()
+        if progress_ref is not None:
+            running_tasks.pop(progress_ref, None)
 
     elapsed = clock() - started_at
     _final_model = _model or getattr(runner, "model", None)

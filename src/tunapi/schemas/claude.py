@@ -239,6 +239,21 @@ class StreamRateLimitEvent(
     message: str | None = None
 
 
+class StreamToolProgressMessage(
+    msgspec.Struct,
+    tag="tool_progress",
+    tag_field="type",
+    forbid_unknown_fields=False,
+):
+    """Progress notification emitted while a Claude tool is still running."""
+
+    tool_use_id: str | None = None
+    tool_name: str | None = None
+    elapsed_time_seconds: float | None = None
+    uuid: str | None = None
+    session_id: str | None = None
+
+
 type StreamJsonMessage = (
     StreamUserMessage
     | StreamAssistantMessage
@@ -249,6 +264,7 @@ type StreamJsonMessage = (
     | StreamControlResponse
     | StreamControlCancelRequest
     | StreamRateLimitEvent
+    | StreamToolProgressMessage
 )
 
 

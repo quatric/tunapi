@@ -114,12 +114,24 @@ async def handle_engine_command(
         await ctx.respond("You are not allowed to use this bot.", ephemeral=True)
         return
 
-    await ctx.defer(ephemeral=True)
+    try:
+        if not getattr(getattr(ctx, "response", None), "is_done", lambda: False)():
+            await ctx.defer(ephemeral=True)
+    except Exception as exc:
+        logger.warning("engine_command.defer_failed", error=str(exc))
 
     guild_id = ctx.guild.id
     channel_id = ctx.channel_id
     if channel_id is None:  # pragma: no cover - Pycord guild commands have a channel
-        await ctx.followup.send("This command requires a channel.", ephemeral=True)
+        try:
+            if getattr(getattr(ctx, "response", None), "is_done", lambda: False)():
+                await ctx.followup.send(
+                    "This command requires a channel.", ephemeral=True
+                )
+            else:
+                await ctx.respond("This command requires a channel.", ephemeral=True)
+        except Exception:
+            pass
         return
     thread_id: int | None = None
     created_new_thread = False
@@ -290,7 +302,16 @@ async def handle_engine_command(
         if attempted_thread_create and thread_id is None
         else ""
     )
-    await ctx.followup.send(
-        f"Started `/{engine_id.lower()}` in {target}{note}.",
-        ephemeral=True,
-    )
+    try:
+        if getattr(getattr(ctx, "response", None), "is_done", lambda: False)():
+            await ctx.followup.send(
+                f"Started `/{engine_id.lower()}` in {target}{note}.",
+                ephemeral=True,
+            )
+        else:
+            await ctx.respond(
+                f"Started `/{engine_id.lower()}` in {target}{note}.",
+                ephemeral=True,
+            )
+    except Exception as exc:
+        logger.warning("engine_command.response_failed", error=str(exc))

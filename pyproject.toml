@@ -57,6 +57,7 @@ claude = "tunapi.runners.claude:BACKEND"
 opencode = "tunapi.runners.opencode:BACKEND"
 pi = "tunapi.runners.pi:BACKEND"
 gemini = "tunapi.runners.gemini:BACKEND"
+antigravity = "tunapi.runners.antigravity:BACKEND"
 
 [project.entry-points."tunapi.transport_backends"]
 telegram = "tunapi.telegram.backend:BACKEND"

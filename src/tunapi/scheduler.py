@@ -119,7 +119,8 @@ class ThreadScheduler:
             return job
 
     async def _clear_busy(self, key: str, done: anyio.Event) -> None:
-        await done.wait()
+        with anyio.move_on_after(1800):
+            await done.wait()
         async with self._lock:
             if self._busy_until.get(key) is done:
                 self._busy_until.pop(key, None)
@@ -140,7 +141,8 @@ class ThreadScheduler:
                         self._queued_by_progress.pop(progress_key, None)
 
                 if done is not None and not done.is_set():
-                    await done.wait()
+                    with anyio.move_on_after(1800):
+                        await done.wait()
 
                 try:
                     await self._run_job(job)

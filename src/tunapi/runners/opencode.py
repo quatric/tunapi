@@ -396,8 +396,12 @@ class OpenCodeRunner(MsgspecJsonlRunnerMixin, ResumeTokenMixin, JsonlSubprocessR
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
         state: OpenCodeStreamState,
+        stderr: str = "",
     ) -> list[TunapiEvent]:
         message = f"opencode failed (rc={rc})."
+        if stderr.strip():
+            detail = stderr.strip().splitlines()[-1]
+            message = f"opencode failed (rc={rc}): {detail}"
         resume_for_completed = found_session or resume
         return [
             self.note_event(

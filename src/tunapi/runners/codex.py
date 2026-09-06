@@ -268,8 +268,12 @@ class CodexRunner(MsgspecJsonlRunnerMixin, ResumeTokenMixin, JsonlSubprocessRunn
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
         state: CodexRunState,
+        stderr: str = "",
     ) -> list[TunapiEvent]:
         message = f"codex exec failed (rc={rc})."
+        if stderr.strip():
+            detail = stderr.strip().splitlines()[-1]
+            message = f"codex exec failed (rc={rc}): {detail}"
         resume_for_completed = found_session or resume
         return [
             self.note_event(
