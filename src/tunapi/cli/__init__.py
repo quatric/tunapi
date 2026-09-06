@@ -192,6 +192,9 @@ def _load_dotenv() -> None:
 
 def main() -> None:
     _load_dotenv()
+    from ..sentry import init_sentry
+
+    init_sentry()
     app = create_app()
     app()
 
